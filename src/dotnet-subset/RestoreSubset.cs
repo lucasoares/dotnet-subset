@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 using Common;
 
 using Microsoft.Build.Construction;
@@ -75,11 +78,65 @@ internal static class RestoreSubset
         if (IsSolutionFile(projectOrSolution))
         {
             var solution = SolutionFile.Parse(projectOrSolution.FullName);
+
             return solution.ProjectsInOrder
                 .Where(p => p.ProjectType != SolutionProjectType.SolutionFolder)
                 .Select(p => new FileInfo(p.AbsolutePath));
         }
-        return new[] { projectOrSolution };
+
+        if (!IsSolutionFilterFile(projectOrSolution))
+        {
+            return new[] { projectOrSolution };
+        }
+
+        var solutionFilter =
+            JsonSerializer.Deserialize<SolutionFilter>(
+                File.ReadAllText(projectOrSolution.FullName));
+
+        // Make sure it is cross-platform using only forward slashes
+        var normalizedDirectoryName = NormalizePath(projectOrSolution.DirectoryName) ??
+                                      throw new InvalidOperationException(
+                                          "projectOrSolution.DirectoryName cannot be null");
+
+        var normalizedSolutionPath = NormalizePath(solutionFilter.Solution?.Path) ??
+                                     throw new InvalidOperationException(
+                                         "solutionFilter.Solution.Path cannot be null");
+
+        var solutionFilePath =
+            Path.GetFullPath(Path.Combine(normalizedDirectoryName, normalizedSolutionPath));
+
+        var solutionDirectory = NormalizePath(Path.GetDirectoryName(solutionFilePath)) ??
+                                throw new InvalidOperationException(
+                                    "solutionDirectory cannot be null");
+
+        var projects = solutionFilter.Solution?.Projects ??
+                       throw new InvalidOperationException(
+                           "solutionFilter.Solution.Projects cannot be null");
+
+        var result = projects
+            .Select(path =>
+            {
+                var normalizedPath = NormalizePath(path) ??
+                                     throw new InvalidOperationException(
+                                         "projects path cannot be null");
+
+                var projectPath =
+                    Path.GetFullPath(Path.Combine(solutionDirectory, normalizedPath));
+
+                return new FileInfo(projectPath);
+            });
+
+        return result;
+    }
+
+    private static string? NormalizePath(string? path)
+    {
+        return path?.Replace('\\', '/');
+    }
+
+    private static bool IsSolutionFilterFile(FileInfo projectOrSolution)
+    {
+        return ".slnf".Equals(projectOrSolution.Extension, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsSolutionFile(FileInfo projectOrSolution)
@@ -234,5 +291,17 @@ internal static class RestoreSubset
         while (len1 == 0 || len2 == 0);
 
         return true;
+    }
+
+    private class SolutionFilter
+    {
+        [JsonPropertyName("solution")] public SolutionInfo? Solution { get; set; }
+
+        public class SolutionInfo
+        {
+            [JsonPropertyName("path")] public string? Path { get; set; }
+
+            [JsonPropertyName("projects")] public List<string>? Projects { get; set; }
+        }
     }
 }
